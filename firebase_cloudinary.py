@@ -47,13 +47,34 @@ def upload_image_to_cloudinary(
     return str(payload["secure_url"])
 
 
-def get_firestore_client(service_account_path: Path) -> firestore.Client:
-    """Initialize (once) and return a Firestore client from serviceAccountKey.json."""
-    if not service_account_path.exists():
-        raise FileNotFoundError(f"Service account key not found at {service_account_path}")
+def reset_firebase_app() -> None:
+    """Clear cached firebase_admin app so newly uploaded credentials take effect immediately."""
+    for app in list(firebase_admin._apps.values()):
+        try:
+            firebase_admin.delete_app(app)
+        except Exception:
+            pass
 
+
+def get_firestore_client(service_account_path: Path | None = None) -> firestore.Client:
+    """Initialize (once) and return a Firestore client from serviceAccountKey.json or Streamlit secrets."""
     if not firebase_admin._apps:
-        cred = credentials.Certificate(str(service_account_path))
+        cred = None
+        # Check Streamlit secrets first if available
+        try:
+            import streamlit as st
+            if hasattr(st, "secrets") and "firebase_service_account" in st.secrets:
+                sa_dict = dict(st.secrets["firebase_service_account"])
+                cred = credentials.Certificate(sa_dict)
+        except Exception:
+            pass
+
+        if cred is None:
+            if service_account_path and Path(service_account_path).exists():
+                cred = credentials.Certificate(str(service_account_path))
+            else:
+                raise FileNotFoundError(f"Service account key not found at {service_account_path}")
+
         firebase_admin.initialize_app(cred)
     return firestore.client()
 

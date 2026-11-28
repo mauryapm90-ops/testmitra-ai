@@ -13,6 +13,7 @@ import streamlit as st
 from firebase_cloudinary import (
     fetch_error_reports,
     publish_test_to_firestore,
+    reset_firebase_app,
     resolve_error_report,
     upload_image_to_cloudinary,
 )
@@ -26,6 +27,17 @@ from pdf_parser import (
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
 SERVICE_ACCOUNT_PATH = BASE_DIR / "serviceAccountKey.json"
+
+# Auto-restore serviceAccountKey.json from Streamlit Cloud secrets if available
+if not SERVICE_ACCOUNT_PATH.exists():
+    try:
+        if hasattr(st, "secrets") and "firebase_service_account" in st.secrets:
+            SERVICE_ACCOUNT_PATH.write_text(
+                json.dumps(dict(st.secrets["firebase_service_account"]), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+    except Exception:
+        pass
 
 load_dotenv(dotenv_path=ENV_PATH)
 
@@ -120,13 +132,30 @@ def _render_sidebar() -> tuple[str, str, dict[str, str]]:
 
         st.divider()
         st.subheader("3. Firebase Firestore")
-        if SERVICE_ACCOUNT_PATH.exists():
+        has_secrets = False
+        try:
+            if hasattr(st, "secrets") and "firebase_service_account" in st.secrets:
+                has_secrets = True
+        except Exception:
+            pass
+
+        if has_secrets:
+            st.success("Firebase configured via Streamlit Secrets!")
+        elif SERVICE_ACCOUNT_PATH.exists():
             st.success("serviceAccountKey.json detected")
+            with st.expander("Update / Replace serviceAccountKey.json"):
+                uploaded_sa = st.file_uploader("Upload new serviceAccountKey.json", type=["json"], key="sa_replace")
+                if uploaded_sa is not None:
+                    SERVICE_ACCOUNT_PATH.write_bytes(uploaded_sa.getvalue())
+                    reset_firebase_app()
+                    st.success("Saved new serviceAccountKey.json!")
+                    st.rerun()
         else:
             st.warning("serviceAccountKey.json not found in /admin_panel")
             uploaded_sa = st.file_uploader("Upload serviceAccountKey.json", type=["json"], key="sa_upload")
             if uploaded_sa is not None:
                 SERVICE_ACCOUNT_PATH.write_bytes(uploaded_sa.getvalue())
+                reset_firebase_app()
                 st.success("Saved serviceAccountKey.json!")
                 st.rerun()
 
@@ -367,7 +396,14 @@ def _render_converter_tab(api_key: str, selected_model: str, cloudinary_cfg: dic
 
 def _render_error_reports_tab() -> None:
     st.subheader("Student Error Reports (Firestore: `error_reports`)")
-    if not SERVICE_ACCOUNT_PATH.exists():
+    has_sa = SERVICE_ACCOUNT_PATH.exists()
+    try:
+        if hasattr(st, "secrets") and "firebase_service_account" in st.secrets:
+            has_sa = True
+    except Exception:
+        pass
+
+    if not has_sa:
         st.info("Upload `serviceAccountKey.json` in the sidebar to view and resolve student Error Reports.")
         return
 
