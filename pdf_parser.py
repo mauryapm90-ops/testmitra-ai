@@ -66,7 +66,7 @@ def list_gemini_models(api_key: str) -> tuple[list[str], str]:
         name = getattr(m, "name", "") or ""
         if name.startswith("models/"):
             name = name.removeprefix("models/")
-        if "gemini" not in name.lower():
+        if "gemini" not in name.lower() or "2.0-flash" in name.lower():
             continue
         supported = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", None) or []
         if supported and not any("generateContent" in str(a) for a in supported):
@@ -207,11 +207,14 @@ def parse_pdf_chunks_in_parallel(
     results: list[tuple[int, list[dict[str, Any]]]] = []
 
     # Build model failover cascade (if primary encounters 503 high demand, seamlessly failover)
-    model_cascade = [model_name]
+    # Build model failover cascade (use modern supported models, exclude deprecated ones)
+    model_cascade = [m for m in [model_name] if "2.0-flash" not in m]
+    if not model_cascade:
+        model_cascade = ["gemini-2.5-flash"]
     fallback_pool = [
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
         "gemini-2.5-flash",
+        "gemini-3.8-flash",
+        "gemini-1.5-flash",
         "gemini-flash-latest",
         "gemini-1.5-pro",
     ]
@@ -236,12 +239,15 @@ def parse_pdf_chunks_in_parallel(
                 return idx, batch
             except Exception as exc:
                 err_str = str(exc).lower()
-                is_transient = any(
+                is_transient_or_deprecated = any(
                     x in err_str
                     for x in (
                         "503",
                         "unavailable",
                         "high demand",
+                        "404",
+                        "not_found",
+                        "no longer available",
                         "429",
                         "quota",
                         "timeout",
@@ -249,8 +255,11 @@ def parse_pdf_chunks_in_parallel(
                         "resourceexhausted",
                     )
                 )
-                if attempt < max_retries and is_transient:
-                    # Exponential backoff: 2s, 4s, 6s + model failover on next attempt
+                if attempt < max_retries and is_transient_or_deprecated:
+                    # If model is deprecated / 404, immediately try next model without delay
+                    if "404" in err_str or "no longer available" in err_str or "not_found" in err_str:
+                        continue
+                    # Exponential backoff for 503/429
                     time.sleep(2.0 * (attempt + 1))
                     continue
                 raise exc
