@@ -337,6 +337,8 @@ def _render_converter_tab(api_key: str, selected_model: str, cloudinary_cfg: dic
             st.success(f"🚀 Speed Boost Complete! Extracted {len(all_questions)} questions across {len(chunks)} chunks in parallel.")
         except Exception as exc:  # noqa: BLE001
             st.error(f"PDF parsing failed: {exc}")
+            if "503" in str(exc) or "unavailable" in str(exc).lower() or "high demand" in str(exc).lower():
+                st.warning("💡 **503 High Demand Solution:** Google के इस मॉडल पर अस्थायी रूप से सर्वर लोड ज़्यादा है। बाएँ साइडबार (Sidebar) में Model Dropdown से `gemini-2.0-flash` या `gemini-1.5-flash` चुनें और दोबारा 'Parse' पर क्लिक करें!")
 
     questions: list[dict[str, Any]] = st.session_state["extracted_questions"]
     if not questions:
