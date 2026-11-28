@@ -26,6 +26,7 @@ from pdf_parser import (
     extract_answer_key_text,
     list_gemini_models,
     parse_pdf_chunk_with_gemini,
+    parse_pdf_chunks_in_parallel,
     split_pdf_into_chunks,
 )
 
@@ -314,29 +315,26 @@ def _render_converter_tab(api_key: str, selected_model: str, cloudinary_cfg: dic
     with u2:
         ans_pdf = st.file_uploader("Upload Answer Key PDF (Optional)", type=["pdf"])
 
-    if st.button("🚀 Parse PDF Verbatim", type="primary", disabled=(q_pdf is None or not api_key)):
+    if st.button("🚀 Parse PDF Verbatim (High-Speed Parallel)", type="primary", disabled=(q_pdf is None or not api_key)):
         try:
             answer_text = extract_answer_key_text(ans_pdf.getvalue()) if ans_pdf is not None else ""
             chunks = split_pdf_into_chunks(q_pdf.getvalue(), chunk_size=5)
-            progress = st.progress(0, text="Splitting PDF into 5-page chunks...")
-            all_questions: list[dict[str, Any]] = []
-            for idx, (start_p, end_p, chunk_bytes) in enumerate(chunks, start=1):
-                progress.progress(
-                    idx / len(chunks),
-                    text=f"Parsing pages {start_p}-{end_p} ({idx}/{len(chunks)}) with {selected_model}...",
-                )
-                batch = parse_pdf_chunk_with_gemini(
-                    api_key=api_key,
-                    model_name=selected_model,
-                    chunk_bytes=chunk_bytes,
-                    start_page=start_p,
-                    end_page=end_p,
-                    answer_key_text=answer_text,
-                )
-                all_questions.extend(batch)
+            progress = st.progress(0, text=f"⚡ Splitting PDF into {len(chunks)} chunks & launching parallel engine (max_workers=3)...")
+
+            def _update_progress(completed: int, total: int, status_msg: str) -> None:
+                progress.progress(completed / total, text=f"⚡ Parallel OCR: {status_msg}")
+
+            all_questions = parse_pdf_chunks_in_parallel(
+                api_key=api_key,
+                model_name=selected_model,
+                chunks=chunks,
+                answer_key_text=answer_text,
+                max_workers=3,
+                progress_callback=_update_progress,
+            )
             st.session_state["extracted_questions"] = all_questions
             progress.empty()
-            st.success(f"Extracted {len(all_questions)} questions across {len(chunks)} PDF chunks.")
+            st.success(f"🚀 Speed Boost Complete! Extracted {len(all_questions)} questions across {len(chunks)} chunks in parallel.")
         except Exception as exc:  # noqa: BLE001
             st.error(f"PDF parsing failed: {exc}")
 
