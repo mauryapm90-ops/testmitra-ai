@@ -206,14 +206,28 @@ def parse_pdf_chunks_in_parallel(
     completed_count = 0
     results: list[tuple[int, list[dict[str, Any]]]] = []
 
+    # Build model failover cascade (if primary encounters 503 high demand, seamlessly failover)
+    model_cascade = [model_name]
+    fallback_pool = [
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-2.5-flash",
+        "gemini-flash-latest",
+        "gemini-1.5-pro",
+    ]
+    for fb in fallback_pool:
+        if fb not in model_cascade:
+            model_cascade.append(fb)
+
     def _worker(item: tuple[int, tuple[int, int, bytes]]) -> tuple[int, list[dict[str, Any]]]:
         idx, (start_p, end_p, chunk_bytes) = item
-        max_retries = 2
+        max_retries = 3
         for attempt in range(max_retries + 1):
+            active_model = model_cascade[min(attempt, len(model_cascade) - 1)]
             try:
                 batch = parse_pdf_chunk_with_gemini(
                     api_key=api_key,
-                    model_name=model_name,
+                    model_name=active_model,
                     chunk_bytes=chunk_bytes,
                     start_page=start_p,
                     end_page=end_p,
@@ -221,8 +235,23 @@ def parse_pdf_chunks_in_parallel(
                 )
                 return idx, batch
             except Exception as exc:
-                if attempt < max_retries and ("429" in str(exc) or "quota" in str(exc).lower() or "timeout" in str(exc).lower()):
-                    time.sleep(2.5 * (attempt + 1))
+                err_str = str(exc).lower()
+                is_transient = any(
+                    x in err_str
+                    for x in (
+                        "503",
+                        "unavailable",
+                        "high demand",
+                        "429",
+                        "quota",
+                        "timeout",
+                        "deadline",
+                        "resourceexhausted",
+                    )
+                )
+                if attempt < max_retries and is_transient:
+                    # Exponential backoff: 2s, 4s, 6s + model failover on next attempt
+                    time.sleep(2.0 * (attempt + 1))
                     continue
                 raise exc
 
