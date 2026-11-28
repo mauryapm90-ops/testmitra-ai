@@ -11,10 +11,15 @@ from dotenv import load_dotenv, set_key
 import streamlit as st
 
 from firebase_cloudinary import (
+    delete_test_from_firestore,
+    fetch_app_config,
     fetch_error_reports,
+    fetch_published_tests,
     publish_test_to_firestore,
     reset_firebase_app,
     resolve_error_report,
+    save_app_config,
+    update_test_in_firestore,
     upload_image_to_cloudinary,
 )
 from pdf_parser import (
@@ -371,6 +376,37 @@ def _render_converter_tab(api_key: str, selected_model: str, cloudinary_cfg: dic
         _render_question_editor(idx, q, cloudinary_cfg)
 
     st.divider()
+    st.subheader("🛡️ Pre-Publish Quality Scorecard (Zero-Defect Gate)")
+    missing_ans = sum(1 for q in questions if int(q.get("correct_index", -1)) == -1)
+    bilingual_count = sum(1 for q in questions if q.get("question_hi") and q.get("question_en"))
+    total_q = len(questions)
+
+    q_score = 100
+    if missing_ans > 0:
+        q_score -= min(50, missing_ans * 10)
+    if total_q != int(target_questions):
+        q_score -= 20
+    bilingual_pct = int((bilingual_count / total_q) * 100) if total_q else 0
+    if bilingual_pct < 80:
+        q_score -= 15
+    q_score = max(0, q_score)
+
+    qc1, qc2, qc3, qc4 = st.columns(4)
+    qc1.metric("Quality Health Score", f"{q_score}/100", delta="Ready" if q_score >= 80 else "Attention")
+    qc2.metric("Answered Questions", f"{total_q - missing_ans}/{total_q}")
+    qc3.metric("Bilingual Ratio", f"{bilingual_pct}%")
+    qc4.metric("Total Test Marks", f"{total_q * float(positive_marks):.1f}")
+
+    if missing_ans > 0:
+        st.error(
+            f"⚠️ Pre-Publish Warning: {missing_ans} question(s) have missing correct answers (-1). Please select the correct options before publishing."
+        )
+    elif total_q != int(target_questions):
+        st.warning(f"⚠️ Target Count Mismatch: Target is {target_questions}, but extracted is {total_q}.")
+    else:
+        st.success("✅ 100% Quality Passed: All questions have valid answers, bilingual text, and marks mapped. Ready for live students!")
+
+    st.divider()
     st.subheader("Export & Publish")
     test_doc = _build_test_document(meta, questions)
     json_str = json.dumps(test_doc, ensure_ascii=False, indent=2)
@@ -443,15 +479,310 @@ def _render_error_reports_tab() -> None:
                         st.error(f"Failed to resolve: {exc}")
 
 
+def _render_manage_tests_tab() -> None:
+    st.subheader("📚 Published Tests Library (Firestore: `tests`)")
+    has_sa = SERVICE_ACCOUNT_PATH.exists()
+    try:
+        if hasattr(st, "secrets") and "firebase_service_account" in st.secrets:
+            has_sa = True
+    except Exception:
+        pass
+
+    if not has_sa:
+        st.info("Upload `serviceAccountKey.json` in the sidebar to manage published tests.")
+        return
+
+    col_ref, col_search = st.columns([1, 3])
+    with col_ref:
+        if st.button("🔄 Refresh Tests"):
+            st.rerun()
+
+    try:
+        all_tests = fetch_published_tests(SERVICE_ACCOUNT_PATH)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Failed to fetch published tests: {exc}")
+        return
+
+    if not all_tests:
+        st.info("No published tests found in Firestore. Parse and publish a test from the PDF Converter tab.")
+        return
+
+    total_count = len(all_tests)
+    live_count = sum(1 for t in all_tests if t.get("is_active", True) is not False)
+    draft_count = total_count - live_count
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total Published Tests", total_count)
+    m2.metric("Live in Student App", live_count)
+    m3.metric("Draft / Hidden", draft_count)
+
+    with col_search:
+        search_query = st.text_input("🔍 Search by title, exam, or category", value="").lower().strip()
+
+    filtered_tests = [
+        t for t in all_tests
+        if not search_query
+        or search_query in str(t.get("title", "")).lower()
+        or search_query in str(t.get("exam_name", "")).lower()
+        or search_query in str(t.get("category", "")).lower()
+    ]
+
+    st.caption(f"Showing {len(filtered_tests)} of {total_count} tests.")
+
+    for t in filtered_tests:
+        test_id = t["id"]
+        title = t.get("title", "Untitled Test")
+        exam_name = t.get("exam_name", "General")
+        category = t.get("category", "General")
+        is_active = t.get("is_active", True) is not False
+        status_badge = "🟢 LIVE" if is_active else "⚪ DRAFT"
+        questions = t.get("questions", [])
+        q_count = len(questions)
+        duration = t.get("duration_mins", 120)
+        pos_marks = t.get("positive_marks", 1.0)
+        neg_marks = t.get("negative_marks", 0.25)
+        is_free = t.get("is_free", True)
+
+        with st.expander(f"[{status_badge}] {exam_name} — {title} ({q_count} Qs, {duration}m) • ID: `{test_id}`"):
+            action_col1, action_col2, action_col3 = st.columns([2, 2, 2])
+            with action_col1:
+                toggle_label = "Switch to Draft (Hide from App)" if is_active else "Switch to Live (Show in App)"
+                if st.button(f"🔄 {toggle_label}", key=f"tog_{test_id}"):
+                    try:
+                        update_test_in_firestore(SERVICE_ACCOUNT_PATH, test_id, {"is_active": not is_active})
+                        st.success(f"Status changed to {'LIVE' if not is_active else 'DRAFT'}!")
+                        st.rerun()
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"Failed to update status: {exc}")
+
+            with action_col2:
+                backup_json = json.dumps(t, ensure_ascii=False, indent=2)
+                st.download_button(
+                    "💾 Download JSON Backup",
+                    data=backup_json.encode("utf-8"),
+                    file_name=f"{exam_name}_{title}_{test_id}.json".replace(" ", "_"),
+                    mime="application/json",
+                    key=f"dl_{test_id}",
+                )
+
+            with action_col3:
+                del_confirm = st.checkbox(f"Confirm Delete", key=f"del_chk_{test_id}")
+                if st.button(f"🗑️ Delete Test", key=f"del_btn_{test_id}", disabled=not del_confirm):
+                    try:
+                        delete_test_from_firestore(SERVICE_ACCOUNT_PATH, test_id)
+                        st.success("Test deleted permanently from Firestore!")
+                        st.rerun()
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"Failed to delete: {exc}")
+
+            st.markdown("---")
+            st.markdown("##### ⚙️ Test Properties & Marks Scheme")
+            prop_col1, prop_col2, prop_col3, prop_col4 = st.columns(4)
+            with prop_col1:
+                new_title = st.text_input("Title", value=title, key=f"meta_title_{test_id}")
+                new_exam = st.text_input("Exam Name", value=exam_name, key=f"meta_exam_{test_id}")
+            with prop_col2:
+                new_category = st.text_input("Category", value=category, key=f"meta_cat_{test_id}")
+                new_duration = st.number_input("Timer (mins)", min_value=5, max_value=300, value=int(duration), key=f"meta_dur_{test_id}")
+            with prop_col3:
+                new_pos = st.number_input("+ Marks", min_value=0.25, max_value=10.0, value=float(pos_marks), step=0.25, key=f"meta_pos_{test_id}")
+                new_neg = st.number_input("- Marks", min_value=0.0, max_value=5.0, value=float(neg_marks), step=0.05, key=f"meta_neg_{test_id}")
+            with prop_col4:
+                new_free = st.checkbox("Free Test", value=is_free, key=f"meta_free_{test_id}")
+                if st.button("💾 Save Metadata", key=f"save_meta_{test_id}"):
+                    try:
+                        update_test_in_firestore(
+                            SERVICE_ACCOUNT_PATH,
+                            test_id,
+                            {
+                                "title": new_title,
+                                "exam_name": new_exam,
+                                "category": new_category,
+                                "duration_mins": new_duration,
+                                "positive_marks": new_pos,
+                                "negative_marks": new_neg,
+                                "is_free": new_free,
+                            },
+                        )
+                        st.success("Metadata updated successfully in Firestore!")
+                        st.rerun()
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"Update failed: {exc}")
+
+            st.markdown("---")
+            st.markdown(f"##### 📝 Question Inspector & Hotfix Editor ({q_count} Questions)")
+            if not questions:
+                st.caption("No questions in this test.")
+            else:
+                q_select_idx = st.selectbox(
+                    f"Select Question to inspect / hotfix (Test: {test_id[:8]})",
+                    options=list(range(len(questions))),
+                    format_func=lambda i: f"Q{i + 1}: {questions[i].get('question_hi', questions[i].get('question_en', ''))[:60]}...",
+                    key=f"q_sel_{test_id}",
+                )
+                target_q = questions[q_select_idx]
+                q_col_hi, q_col_en = st.columns(2)
+                with q_col_hi:
+                    target_q["question_hi"] = st.text_area(
+                        "Question Hindi",
+                        value=target_q.get("question_hi", ""),
+                        key=f"edit_hi_{test_id}_{q_select_idx}",
+                    )
+                with q_col_en:
+                    target_q["question_en"] = st.text_area(
+                        "Question English",
+                        value=target_q.get("question_en", ""),
+                        key=f"edit_en_{test_id}_{q_select_idx}",
+                    )
+
+                opts = target_q.get("options", [])
+                st.markdown("**Options:**")
+                opt_cols = st.columns(min(len(opts), 4) or 1)
+                for opt_i, opt_val in enumerate(opts):
+                    col_idx = opt_i % len(opt_cols)
+                    with opt_cols[col_idx]:
+                        opts[opt_i] = st.text_input(
+                            f"Opt {_option_label(opt_i)}",
+                            value=opt_val,
+                            key=f"edit_opt_{test_id}_{q_select_idx}_{opt_i}",
+                        )
+                target_q["options"] = opts
+
+                ans_col1, ans_col2 = st.columns([1, 2])
+                with ans_col1:
+                    choice_opts = [-1] + list(range(len(opts)))
+                    curr_ans = target_q.get("correct_index", -1)
+                    if curr_ans not in choice_opts:
+                        curr_ans = -1
+                    target_q["correct_index"] = st.selectbox(
+                        "Correct Answer Index",
+                        options=choice_opts,
+                        index=choice_opts.index(curr_ans),
+                        format_func=lambda x: "Missing (-1)" if x == -1 else f"{_option_label(x)}: {opts[x][:25]}",
+                        key=f"edit_ans_{test_id}_{q_select_idx}",
+                    )
+                with ans_col2:
+                    target_q["explanation"] = st.text_input(
+                        "Explanation",
+                        value=target_q.get("explanation", ""),
+                        key=f"edit_exp_{test_id}_{q_select_idx}",
+                    )
+
+                if st.button("⚡ Save Question Hotfix to Cloud", key=f"save_q_{test_id}_{q_select_idx}"):
+                    try:
+                        questions[q_select_idx] = target_q
+                        update_test_in_firestore(
+                            SERVICE_ACCOUNT_PATH,
+                            test_id,
+                            {"questions": questions},
+                        )
+                        st.success(f"Q{q_select_idx + 1} hotfix saved directly to Firestore!")
+                        st.rerun()
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"Question update failed: {exc}")
+
+
+def _render_app_config_tab() -> None:
+    st.subheader("🗓️ Sunday Mega Mock & App Remote Controller (Firestore: `app_config/home_config`)")
+    has_sa = SERVICE_ACCOUNT_PATH.exists()
+    try:
+        if hasattr(st, "secrets") and "firebase_service_account" in st.secrets:
+            has_sa = True
+    except Exception:
+        pass
+
+    if not has_sa:
+        st.info("Upload `serviceAccountKey.json` in the sidebar to configure the live mobile/web app.")
+        return
+
+    try:
+        current_cfg = fetch_app_config(SERVICE_ACCOUNT_PATH)
+        published_tests = fetch_published_tests(SERVICE_ACCOUNT_PATH)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Failed to fetch config or tests: {exc}")
+        return
+
+    st.info("💡 **25-Year EdTech Pro Tip:** यहाँ से आप बिना मोबाइल ऐप दोबारा अपडेट या रीबिल्ड किए, सीधे हज़ारों छात्रों की ऐप स्क्रीन पर संडे मेगा मॉक और नोटिस बैनर रियल-टाइम कंट्रोल कर सकते हैं।")
+
+    st.markdown("#### 🔴 1. Sunday Mega Mock Event Controller")
+    c1, c2 = st.columns(2)
+    with c1:
+        mega_active = st.checkbox("Show Sunday Mega Mock Card on Home Screen", value=bool(current_cfg.get("mega_mock_active", True)))
+        mega_title = st.text_input("Mega Mock Title", value=str(current_cfg.get("mega_mock_title", "All-UP Sunday Mega Mock 01")))
+        mega_exam = st.text_input("Target Exam Badge", value=str(current_cfg.get("mega_mock_exam", "UPSSSC PET 2026 / UP Police")))
+    with c2:
+        mega_date = st.text_input("Target Live Date / Timing", value=str(current_cfg.get("mega_mock_target_date", "Sunday, 9:00 AM - 11:59 PM")))
+        mega_participants = st.number_input("Displayed Participants Count", min_value=100, max_value=500000, value=int(current_cfg.get("mega_mock_participants", 18400)), step=100)
+        mega_cutoff = st.number_input("Expected Safe Cutoff Score", min_value=10.0, max_value=200.0, value=float(current_cfg.get("mega_mock_cutoff", 74.5)), step=0.5)
+
+    test_options = [""] + [t["id"] for t in published_tests]
+    curr_test_id = current_cfg.get("mega_mock_test_id", "")
+    if curr_test_id not in test_options:
+        test_options.append(curr_test_id)
+
+    selected_test_id = st.selectbox(
+        "Attached Mock Test (When student taps 'Start Mock Test')",
+        options=test_options,
+        index=test_options.index(curr_test_id),
+        format_func=lambda tid: "Default (First Available Test)" if not tid else next(
+            (f"{t.get('exam_name')} — {t.get('title')} (ID: {tid[:8]})" for t in published_tests if t["id"] == tid),
+            f"Test ID: {tid}",
+        ),
+    )
+
+    st.markdown("---")
+    st.markdown("#### 📢 2. App Announcement / Notice Ticker")
+    n1, n2 = st.columns([1, 3])
+    with n1:
+        notice_active = st.checkbox("Show Announcement Banner", value=bool(current_cfg.get("notice_active", True)))
+        notice_tag = st.selectbox("Notice Tag", ["NEW", "LIVE", "ALERT", "UPDATE"], index=["NEW", "LIVE", "ALERT", "UPDATE"].index(current_cfg.get("notice_tag", "NEW")) if current_cfg.get("notice_tag") in ["NEW", "LIVE", "ALERT", "UPDATE"] else 0)
+    with n2:
+        notice_text = st.text_area(
+            "Notice Headline",
+            value=str(current_cfg.get("notice_text", "🔥 All-UP Sunday Mega Mock Test Registration is Live! Practice with State Rank Predictor.")),
+            height=85,
+        )
+
+    st.markdown("---")
+    if st.button("💾 Save Remote Config & Sync to App", type="primary", use_container_width=True):
+        new_cfg = {
+            "mega_mock_active": mega_active,
+            "mega_mock_title": mega_title,
+            "mega_mock_exam": mega_exam,
+            "mega_mock_target_date": mega_date,
+            "mega_mock_participants": mega_participants,
+            "mega_mock_cutoff": mega_cutoff,
+            "mega_mock_test_id": selected_test_id,
+            "notice_active": notice_active,
+            "notice_tag": notice_tag,
+            "notice_text": notice_text,
+        }
+        try:
+            save_app_config(SERVICE_ACCOUNT_PATH, new_cfg)
+            st.success("✅ Remote Config saved to Firestore `app_config/home_config`! All student devices will load these settings instantly on launch/refresh.")
+            st.rerun()
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Failed to save app config: {exc}")
+
+
 def main() -> None:
     _init_session_state()
     api_key, selected_model, cloudinary_cfg = _render_sidebar()
 
-    st.title("TestMitra AI — PDF-to-Test Admin Panel")
-    tab1, tab2 = st.tabs(["📄 PDF-to-Test Converter", "🚩 Student Error Reports"])
+    st.title("TestMitra AI — Admin Mission Control")
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📄 PDF-to-Test Converter",
+        "📚 Manage Published Tests",
+        "🗓️ Mega Mock & App Config",
+        "🚩 Student Error Reports",
+    ])
     with tab1:
         _render_converter_tab(api_key, selected_model, cloudinary_cfg)
     with tab2:
+        _render_manage_tests_tab()
+    with tab3:
+        _render_app_config_tab()
+    with tab4:
         _render_error_reports_tab()
 
 
