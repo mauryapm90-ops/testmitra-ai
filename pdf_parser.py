@@ -139,6 +139,7 @@ def parse_pdf_chunk_with_gemini(
     answer_key_text: str = "",
 ) -> list[dict[str, Any]]:
     """Run strict temperature=0.0 Gemini OCR/JSON extraction on a 5-page PDF chunk."""
+    clean_key = (api_key or "").strip()
     clean_model = (model_name or "").strip()
     if clean_model.startswith("models/"):
         clean_model = clean_model.removeprefix("models/")
@@ -152,7 +153,7 @@ def parse_pdf_chunk_with_gemini(
     ) or "2.0-flash" in clean_model:
         clean_model = "gemini-1.5-flash"
 
-    client = genai.Client(api_key=api_key, http_options=types.HttpOptions(api_version="v1beta"))
+    client = genai.Client(api_key=clean_key)
     prompt = (
         f"Extract every single question from pages {start_page} to {end_page} of this exam PDF verbatim into JSON. "
         "Do not invent or skip any question."
@@ -171,20 +172,39 @@ def parse_pdf_chunk_with_gemini(
         "response_mime_type": "application/json",
         "response_schema": ExtractedQuestionBatch,
     }
-    if hasattr(types, "ThinkingConfig"):
-        try:
-            cfg_args["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
-        except Exception:
-            pass
 
-    response = client.models.generate_content(
-        model=clean_model,
-        contents=[
-            types.Part.from_bytes(data=chunk_bytes, mime_type="application/pdf"),
-            prompt,
-        ],
-        config=types.GenerateContentConfig(**cfg_args),
-    )
+    try:
+        response = client.models.generate_content(
+            model=clean_model,
+            contents=[
+                types.Part.from_bytes(data=chunk_bytes, mime_type="application/pdf"),
+                prompt,
+            ],
+            config=types.GenerateContentConfig(**cfg_args),
+        )
+    except Exception as exc:
+        err_lower = str(exc).lower()
+        if "400" in err_lower or "invalid_argument" in err_lower:
+            # Fallback without response_schema in case strict schema is rejected
+            cfg_fallback: dict[str, Any] = {
+                "system_instruction": STRICT_OCR_SYSTEM_PROMPT,
+                "temperature": 0.0,
+                "response_mime_type": "application/json",
+            }
+            json_prompt = (
+                f"{prompt}\nReturn a valid JSON object matching schema: "
+                '{"questions": [{"question_hi": "", "question_en": "", "image_url": "", "options": [], "correct_index": -1, "explanation": "", "subject": "General"}]}'
+            )
+            response = client.models.generate_content(
+                model=clean_model,
+                contents=[
+                    types.Part.from_bytes(data=chunk_bytes, mime_type="application/pdf"),
+                    json_prompt,
+                ],
+                config=types.GenerateContentConfig(**cfg_fallback),
+            )
+        else:
+            raise exc
 
     raw_text = response.text or "{}"
     parsed = json.loads(raw_text)
