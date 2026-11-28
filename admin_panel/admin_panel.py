@@ -60,7 +60,7 @@ st.set_page_config(
 def _init_session_state() -> None:
     defaults: dict[str, Any] = {
         "gemini_api_key": st.session_state.get("gemini_api_key", "") or "",
-        "available_models": ["gemini-1.5-flash", "gemini-1.5-pro"],
+        "available_models": ["gemini-1.5-flash", "gemini-1.5-flash-8b"],
         "selected_model": "gemini-1.5-flash",
         "extracted_questions": [],
         "last_test_doc": None,
@@ -74,10 +74,12 @@ def _init_session_state() -> None:
     if cur_model.startswith("models/"):
         cur_model = cur_model.removeprefix("models/")
     if cur_model in (
+        "gemini-1.5-pro",
         "gemini-flash-latest",
         "gemini-2.0-flash",
         "gemini-2.5-flash",
         "gemini-3.8-flash",
+        "models/gemini-1.5-pro",
         "",
     ) or "2.0-flash" in cur_model:
         st.session_state["selected_model"] = "gemini-1.5-flash"
@@ -86,17 +88,19 @@ def _init_session_state() -> None:
     st.session_state["available_models"] = [
         m for m in raw_available
         if m not in (
+            "gemini-1.5-pro",
             "gemini-flash-latest",
             "gemini-2.0-flash",
             "gemini-2.5-flash",
             "gemini-3.8-flash",
             "models/gemini-flash-latest",
             "models/gemini-2.0-flash",
+            "models/gemini-1.5-pro",
         )
         and "2.0-flash" not in m
     ]
     if not st.session_state["available_models"]:
-        st.session_state["available_models"] = ["gemini-1.5-flash", "gemini-1.5-pro"]
+        st.session_state["available_models"] = ["gemini-1.5-flash", "gemini-1.5-flash-8b"]
 
 
 def _save_env_var(key: str, value: str) -> None:
@@ -136,11 +140,12 @@ def _render_sidebar() -> tuple[str, str, dict[str, str]]:
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Failed to list models: {exc}")
 
-        if api_key and not st.session_state["available_models"]:
+        if api_key and (not st.session_state.get("available_models") or st.session_state.get("_last_checked_key") != api_key):
             try:
                 models, default_model = list_gemini_models(api_key)
                 st.session_state["available_models"] = models
                 st.session_state["selected_model"] = default_model
+                st.session_state["_last_checked_key"] = api_key
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Could not fetch models: {exc}")
         elif not api_key:
@@ -152,17 +157,19 @@ def _render_sidebar() -> tuple[str, str, dict[str, str]]:
             for m in raw_opts
             if m
             not in (
+                "gemini-1.5-pro",
                 "gemini-flash-latest",
                 "gemini-2.0-flash",
                 "gemini-2.5-flash",
                 "gemini-3.8-flash",
                 "models/gemini-flash-latest",
                 "models/gemini-2.0-flash",
+                "models/gemini-1.5-pro",
             )
             and "2.0-flash" not in m
         ]
         if not model_options:
-            model_options = ["gemini-1.5-flash", "gemini-1.5-pro"]
+            model_options = ["gemini-1.5-flash", "gemini-1.5-flash-8b"]
 
         if st.session_state.get("selected_model") not in model_options:
             st.session_state["selected_model"] = model_options[0]
@@ -444,7 +451,7 @@ def _render_converter_tab(api_key: str, selected_model: str, cloudinary_cfg: dic
             except Exception as exc:  # noqa: BLE001
                 st.error(f"PDF parsing failed: {exc}")
                 if "503" in str(exc) or "unavailable" in str(exc).lower() or "high demand" in str(exc).lower():
-                    st.warning("💡 **503 High Demand Solution:** Google के इस मॉडल पर अस्थायी रूप से सर्वर लोड ज़्यादा है। बाएँ साइडबार (Sidebar) में Model Dropdown से `gemini-1.5-pro` या `gemini-1.5-flash` चुनें और दोबारा 'Parse' पर क्लिक करें!")
+                    st.warning("💡 **503 High Demand Solution:** Google के इस मॉडल पर अस्थायी रूप से सर्वर लोड ज़्यादा है। बाएँ साइडबार (Sidebar) में Model Dropdown से `gemini-1.5-flash-8b` या `gemini-1.5-flash` चुनें और दोबारा 'Parse' पर क्लिक करें!")
 
     questions: list[dict[str, Any]] = st.session_state["extracted_questions"]
     if not questions:
