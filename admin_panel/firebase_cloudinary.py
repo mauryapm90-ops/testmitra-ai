@@ -113,3 +113,68 @@ def resolve_error_report(service_account_path: Path, report_id: str, admin_note:
             "resolved_at": firestore.SERVER_TIMESTAMP,
         }
     )
+
+
+def fetch_published_tests(service_account_path: Path, limit: int = 100) -> list[dict[str, Any]]:
+    """Fetch all published tests from Firestore collection `tests`."""
+    db = get_firestore_client(service_account_path)
+    docs = db.collection("tests").limit(limit).stream()
+    tests: list[dict[str, Any]] = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        data["id"] = doc.id
+        tests.append(data)
+    # Sort in memory: newest first if created_at exists
+    tests.sort(
+        key=lambda t: str(t.get("created_at") or t.get("createdAt") or ""),
+        reverse=True,
+    )
+    return tests
+
+
+def update_test_in_firestore(
+    service_account_path: Path, test_id: str, updated_fields: dict[str, Any]
+) -> None:
+    """Update fields of an existing published test in Firestore."""
+    db = get_firestore_client(service_account_path)
+    updated_fields["updated_at"] = firestore.SERVER_TIMESTAMP
+    db.collection("tests").document(test_id).update(updated_fields)
+
+
+def delete_test_from_firestore(service_account_path: Path, test_id: str) -> None:
+    """Delete a test document from Firestore."""
+    db = get_firestore_client(service_account_path)
+    db.collection("tests").document(test_id).delete()
+
+
+def fetch_app_config(service_account_path: Path) -> dict[str, Any]:
+    """Fetch app-wide remote configuration (Sunday Mega Mock, Notice Ticker) from Firestore `app_config/home_config`."""
+    db = get_firestore_client(service_account_path)
+    doc_ref = db.collection("app_config").document("home_config")
+    snap = doc_ref.get()
+    if snap.exists:
+        data = snap.to_dict() or {}
+        data["id"] = snap.id
+        return data
+
+    # Default fallback configuration
+    return {
+        "mega_mock_active": True,
+        "mega_mock_title": "All-UP Sunday Mega Mock 01",
+        "mega_mock_exam": "UPSSSC PET / UP Police",
+        "mega_mock_target_date": "Sunday, 9:00 AM",
+        "mega_mock_participants": 18400,
+        "mega_mock_cutoff": 74.5,
+        "mega_mock_test_id": "",
+        "notice_active": True,
+        "notice_text": "🔥 All-UP Sunday Mega Mock Test Registration is Live! Practice with State Rank Predictor.",
+        "notice_tag": "NEW",
+    }
+
+
+def save_app_config(service_account_path: Path, config_data: dict[str, Any]) -> None:
+    """Save or update app-wide remote configuration in Firestore `app_config/home_config`."""
+    db = get_firestore_client(service_account_path)
+    config_data["updated_at"] = firestore.SERVER_TIMESTAMP
+    db.collection("app_config").document("home_config").set(config_data, merge=True)
+
