@@ -63,7 +63,7 @@ def list_gemini_models(api_key: str) -> tuple[list[str], str]:
     models: list[str] = []
     if api_key:
         try:
-            client = genai.Client(api_key=api_key)
+            client = genai.Client(api_key=api_key, http_options=types.HttpOptions(api_version="v1beta"))
             for m in client.models.list():
                 name = getattr(m, "name", "") or ""
                 if name.startswith("models/"):
@@ -73,27 +73,39 @@ def list_gemini_models(api_key: str) -> tuple[list[str], str]:
                     continue
                 if any(
                     bad in name_lower
-                    for bad in ("2.0-flash", "flash-latest", "tts", "image", "audio", "live")
+                    for bad in (
+                        "2.0-flash",
+                        "flash-latest",
+                        "tts",
+                        "image",
+                        "audio",
+                        "live",
+                        "embedding",
+                        "aqa",
+                        "1.5-pro",
+                    )
                 ):
                     continue
                 models.append(name)
         except Exception:
             pass
 
-    # Guaranteed valid active models for v1 generateContent
-    guaranteed = ["gemini-1.5-flash", "gemini-1.5-pro"]
+    # Reliable active models for generateContent (gemini-1.5-flash is the primary production model)
+    guaranteed = ["gemini-1.5-flash", "gemini-1.5-flash-8b"]
     unique = list(dict.fromkeys(models + guaranteed))
     unique = [
         m
         for m in unique
         if m
         not in (
+            "gemini-1.5-pro",
             "gemini-flash-latest",
             "gemini-2.0-flash",
             "gemini-2.5-flash",
             "gemini-3.8-flash",
             "models/gemini-flash-latest",
             "models/gemini-2.0-flash",
+            "models/gemini-1.5-pro",
         )
         and "2.0-flash" not in m
     ]
@@ -130,10 +142,17 @@ def parse_pdf_chunk_with_gemini(
     clean_model = (model_name or "").strip()
     if clean_model.startswith("models/"):
         clean_model = clean_model.removeprefix("models/")
-    if clean_model in ("gemini-flash-latest", "gemini-2.0-flash", "gemini-2.5-flash", "gemini-3.8-flash") or "2.0-flash" in clean_model:
+    if clean_model in (
+        "gemini-1.5-pro",
+        "gemini-flash-latest",
+        "gemini-2.0-flash",
+        "gemini-2.5-flash",
+        "gemini-3.8-flash",
+        "models/gemini-1.5-pro",
+    ) or "2.0-flash" in clean_model:
         clean_model = "gemini-1.5-flash"
 
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=api_key, http_options=types.HttpOptions(api_version="v1beta"))
     prompt = (
         f"Extract every single question from pages {start_page} to {end_page} of this exam PDF verbatim into JSON. "
         "Do not invent or skip any question."
@@ -214,17 +233,19 @@ def parse_pdf_chunks_in_parallel(
     if sanitized_model.startswith("models/"):
         sanitized_model = sanitized_model.removeprefix("models/")
     if sanitized_model in (
+        "gemini-1.5-pro",
         "gemini-flash-latest",
         "gemini-2.0-flash",
         "gemini-2.5-flash",
         "gemini-3.8-flash",
+        "models/gemini-1.5-pro",
     ) or "2.0-flash" in sanitized_model:
         sanitized_model = "gemini-1.5-flash"
 
     model_cascade = [sanitized_model]
     fallback_pool = [
         "gemini-1.5-flash",
-        "gemini-1.5-pro",
+        "gemini-1.5-flash-8b",
     ]
     for fb in fallback_pool:
         if fb not in model_cascade:
@@ -235,7 +256,16 @@ def parse_pdf_chunks_in_parallel(
         max_retries = 3
         for attempt in range(max_retries + 1):
             active_model = model_cascade[min(attempt, len(model_cascade) - 1)]
-            if active_model in ("gemini-flash-latest", "gemini-2.0-flash", "gemini-2.5-flash") or "2.0-flash" in active_model:
+            if (
+                active_model in (
+                    "gemini-1.5-pro",
+                    "gemini-flash-latest",
+                    "gemini-2.0-flash",
+                    "gemini-2.5-flash",
+                    "models/gemini-1.5-pro",
+                )
+                or "2.0-flash" in active_model
+            ):
                 active_model = "gemini-1.5-flash"
             try:
                 batch = parse_pdf_chunk_with_gemini(
